@@ -27,6 +27,8 @@ public abstract class Enchantment implements Cloneable {
 
     protected static Enchantment[] enchantments;
 
+    //http://minecraft.gamepedia.com/Enchanting#Aqua_Affinity
+
     public static final int ID_PROTECTION_ALL = 0;
     public static final int ID_PROTECTION_FIRE = 1;
     public static final int ID_PROTECTION_FALL = 2;
@@ -34,13 +36,8 @@ public abstract class Enchantment implements Cloneable {
     public static final int ID_PROTECTION_PROJECTILE = 4;
     public static final int ID_THORNS = 5;
     public static final int ID_WATER_BREATHING = 6;
-    /**
-     * @deprecated Use {@link #ID_WATER_WORKER}, this value is deprecated due to a typo on it's name;
-     */
-    @Deprecated
-    public static final int UD_WATER_WORKER = 7;
-    public static final int ID_WATER_WORKER = 7;
-    public static final int ID_WATER_WALKER = 8;
+    public static final int ID_WATER_WALKER = 7;
+    public static final int ID_WATER_WORKER = 8;
     public static final int ID_DAMAGE_ALL = 9;
     public static final int ID_DAMAGE_SMITE = 10;
     public static final int ID_DAMAGE_ARTHROPODS = 11;
@@ -93,7 +90,7 @@ public abstract class Enchantment implements Cloneable {
     }
 
     public static Enchantment getEnchantment(int id) {
-        return get(id).clone();
+        return get(id) == null ? null : get(id).clone();
     }
 
     public static Enchantment[] getEnchantments() {
@@ -129,14 +126,14 @@ public abstract class Enchantment implements Cloneable {
         return level;
     }
 
-    public void setLevel(int level) {
-        this.setLevel(level, true);
+    public Enchantment setLevel(int level) {
+        return this.setLevel(level, true);
     }
 
-    public void setLevel(int level, boolean safe) {
+    public Enchantment setLevel(int level, boolean safe) {
         if (!safe) {
             this.level = level;
-            return;
+            return this;
         }
 
         if (level > this.getMaxLevel()) {
@@ -146,6 +143,8 @@ public abstract class Enchantment implements Cloneable {
         } else {
             this.level = level;
         }
+
+        return this;
     }
 
     public int getId() {
@@ -176,7 +175,7 @@ public abstract class Enchantment implements Cloneable {
         return this.getMinEnchantAbility(level) + 5;
     }
 
-    public int getDamageProtection(EntityDamageEvent event) {
+    public float getDamageProtection(EntityDamageEvent event) {
         return 0;
     }
 

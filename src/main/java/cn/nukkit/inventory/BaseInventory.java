@@ -169,7 +169,7 @@ public abstract class BaseInventory implements Inventory {
     @Override
     public boolean contains(Item item) {
         int count = Math.max(1, item.getCount());
-        boolean checkDamage = item.hasMeta();
+        boolean checkDamage = item.hasMeta() && item.getDamage() >= 0;
         boolean checkTag = item.getCompoundTag() != null;
         for (Item i : this.getContents().values()) {
             if (item.equals(i, checkDamage, checkTag)) {
@@ -186,7 +186,7 @@ public abstract class BaseInventory implements Inventory {
     @Override
     public Map<Integer, Item> all(Item item) {
         Map<Integer, Item> slots = new HashMap<>();
-        boolean checkDamage = item.hasMeta();
+        boolean checkDamage = item.hasMeta() && item.getDamage() >= 0;
         boolean checkTag = item.getCompoundTag() != null;
         for (Map.Entry<Integer, Item> entry : this.getContents().entrySet()) {
             if (item.equals(entry.getValue(), checkDamage, checkTag)) {
@@ -322,7 +322,7 @@ public abstract class BaseInventory implements Inventory {
             }
         }
 
-        for (int i = 0; i < this.getSize(); ++i) {
+        for (int i = 0; i < this.size; ++i) {
             Item item = this.getItem(i);
             if (item.getId() == Item.AIR || item.getCount() <= 0) {
                 continue;
@@ -445,6 +445,7 @@ public abstract class BaseInventory implements Inventory {
         }
 
         for (Player player : players) {
+            pk.eid = player.getId();
             int id = player.getWindowId(this);
             if (id == -1 || !player.spawned) {
                 this.close(player);
@@ -453,6 +454,54 @@ public abstract class BaseInventory implements Inventory {
             pk.windowid = (byte) id;
             player.dataPacket(pk);
         }
+    }
+
+    @Override
+    public boolean isFull() {
+        if (this.slots.size() < this.getSize()) {
+            return false;
+        }
+
+        for (Item item : this.slots.values()) {
+            if (item == null || item.getId() == 0 || item.getCount() < item.getMaxStackSize() || item.getCount() < this.getMaxStackSize()) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    @Override
+    public boolean isEmpty() {
+        if (this.getMaxStackSize() <= 0) {
+            return false;
+        }
+
+        for (Item item : this.slots.values()) {
+            if (item != null && item.getId() != 0 && item.getCount() > 0) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    public int getFreeSpace(Item item) {
+        int maxStackSize = Math.min(item.getMaxStackSize(), this.getMaxStackSize());
+        int space = (this.getSize() - this.slots.size()) * maxStackSize;
+
+        for (Item slot : this.getContents().values()) {
+            if (slot == null || slot.getId() == 0) {
+                space += maxStackSize;
+                continue;
+            }
+
+            if (slot.equals(item, true, true)) {
+                space += maxStackSize - slot.getCount();
+            }
+        }
+
+        return space;
     }
 
     @Override

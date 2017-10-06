@@ -4,13 +4,15 @@ import cn.nukkit.Player;
 import cn.nukkit.Server;
 import cn.nukkit.block.Block;
 import cn.nukkit.entity.data.ShortEntityData;
+import cn.nukkit.entity.item.EntityVehicle;
 import cn.nukkit.entity.passive.EntityWaterAnimal;
 import cn.nukkit.event.entity.*;
+import cn.nukkit.event.entity.EntityDamageEvent.DamageCause;
 import cn.nukkit.item.Item;
 import cn.nukkit.level.format.FullChunk;
 import cn.nukkit.math.Vector3;
 import cn.nukkit.nbt.tag.CompoundTag;
-import cn.nukkit.nbt.tag.ShortTag;
+import cn.nukkit.nbt.tag.FloatTag;
 import cn.nukkit.network.protocol.EntityEventPacket;
 import cn.nukkit.potion.Effect;
 import cn.nukkit.utils.BlockIterator;
@@ -26,6 +28,7 @@ import java.util.Map;
  * Nukkit Project
  */
 public abstract class EntityLiving extends Entity implements EntityDamageable {
+
     public EntityLiving(FullChunk chunk, CompoundTag nbt) {
         super(chunk, nbt);
     }
@@ -51,15 +54,15 @@ public abstract class EntityLiving extends Entity implements EntityDamageable {
         super.initEntity();
 
         if (this.namedTag.contains("HealF")) {
-            this.namedTag.putShort("Health", this.namedTag.getShort("HealF"));
+            this.namedTag.putFloat("Health", this.namedTag.getShort("HealF"));
             this.namedTag.remove("HealF");
         }
 
-        if (!this.namedTag.contains("Health") || !(this.namedTag.get("Health") instanceof ShortTag)) {
-            this.namedTag.putShort("Health", this.getMaxHealth());
+        if (!this.namedTag.contains("Health") || !(this.namedTag.get("Health") instanceof FloatTag)) {
+            this.namedTag.putFloat("Health", this.getMaxHealth());
         }
 
-        this.setHealth(this.namedTag.getShort("Health"));
+        this.setHealth(this.namedTag.getFloat("Health"));
     }
 
     @Override
@@ -77,12 +80,16 @@ public abstract class EntityLiving extends Entity implements EntityDamageable {
     @Override
     public void saveNBT() {
         super.saveNBT();
-        this.namedTag.putShort("Health", (int) this.getHealth());
+        this.namedTag.putFloat("Health", this.getHealth());
     }
 
     public boolean hasLineOfSight(Entity entity) {
         //todo
         return true;
+    }
+
+    public void collidingWith(EntityVehicle ent) { // can override (IronGolem|Bats)
+        ent.applyEntityCollision(this);
     }
 
     @Override
@@ -96,41 +103,41 @@ public abstract class EntityLiving extends Entity implements EntityDamageable {
     }
 
     @Override
-    public void attack(EntityDamageEvent source) {
+    public boolean attack(EntityDamageEvent source) {
         if (this.attackTime > 0 || this.noDamageTicks > 0) {
             EntityDamageEvent lastCause = this.getLastDamageCause();
             if (lastCause != null && lastCause.getDamage() >= source.getDamage()) {
-                source.setCancelled();
+                return false;
             }
         }
 
-        super.attack(source);
+        if (super.attack(source)) {
+            if (source instanceof EntityDamageByEntityEvent) {
+                Entity e = ((EntityDamageByEntityEvent) source).getDamager();
+                if (source instanceof EntityDamageByChildEntityEvent) {
+                    e = ((EntityDamageByChildEntityEvent) source).getChild();
+                }
 
-        if (source.isCancelled()) {
-            return;
-        }
+                if (e.isOnFire() && !(e instanceof Player)) {
+                    this.setOnFire(2 * this.server.getDifficulty());
+                }
 
-        if (source instanceof EntityDamageByEntityEvent) {
-            Entity e = ((EntityDamageByEntityEvent) source).getDamager();
-            if (source instanceof EntityDamageByChildEntityEvent) {
-                e = ((EntityDamageByChildEntityEvent) source).getChild();
+                double deltaX = this.x - e.x;
+                double deltaZ = this.z - e.z;
+                this.knockBack(e, source.getDamage(), deltaX, deltaZ, ((EntityDamageByEntityEvent) source).getKnockBack());
             }
 
-            if (e.isOnFire() && !(e instanceof Player)) {
-                this.setOnFire(2 * this.server.getDifficulty());
-            }
+            EntityEventPacket pk = new EntityEventPacket();
+            pk.eid = this.getId();
+            pk.event = this.getHealth() <= 0 ? EntityEventPacket.DEATH_ANIMATION : EntityEventPacket.HURT_ANIMATION;
+            Server.broadcastPacket(this.hasSpawned.values(), pk);
 
-            double deltaX = this.x - e.x;
-            double deltaZ = this.z - e.z;
-            this.knockBack(e, source.getDamage(), deltaX, deltaZ, ((EntityDamageByEntityEvent) source).getKnockBack());
+            this.attackTime = 10;
+
+            return true;
+        } else {
+            return false;
         }
-
-        EntityEventPacket pk = new EntityEventPacket();
-        pk.eid = this.getId();
-        pk.event = this.getHealth() <= 0 ? EntityEventPacket.DEATH_ANIMATION : EntityEventPacket.HURT_ANIMATION;
-        Server.broadcastPacket(this.hasSpawned.values(), pk);
-
-        this.attackTime = 10;
     }
 
     public void knockBack(Entity attacker, double damage, double x, double z) {
@@ -169,8 +176,11 @@ public abstract class EntityLiving extends Entity implements EntityDamageable {
         super.kill();
         EntityDeathEvent ev = new EntityDeathEvent(this, this.getDrops());
         this.server.getPluginManager().callEvent(ev);
-        for (cn.nukkit.item.Item item : ev.getDrops()) {
-            this.getLevel().dropItem(this, item);
+
+        if (this.level.getGameRules().getBoolean("doEntityDrops")) {
+            for (cn.nukkit.item.Item item : ev.getDrops()) {
+                this.getLevel().dropItem(this, item);
+            }
         }
     }
 
@@ -187,10 +197,10 @@ public abstract class EntityLiving extends Entity implements EntityDamageable {
         boolean hasUpdate = super.entityBaseTick(tickDiff);
 
         if (this.isAlive()) {
+
             if (this.isInsideOfSolid()) {
                 hasUpdate = true;
-                EntityDamageEvent ev = new EntityDamageEvent(this, EntityDamageEvent.CAUSE_SUFFOCATION, 1);
-                this.attack(ev);
+                this.attack(new EntityDamageEvent(this, DamageCause.SUFFOCATION, 1));
             }
 
             if (!this.hasEffect(Effect.WATER_BREATHING) && this.isInsideOfWater()) {
@@ -202,8 +212,7 @@ public abstract class EntityLiving extends Entity implements EntityDamageable {
 
                     if (airTicks <= -20) {
                         airTicks = 0;
-                        EntityDamageEvent ev = new EntityDamageEvent(this, EntityDamageEvent.CAUSE_DROWNING, 2);
-                        this.attack(ev);
+                        this.attack(new EntityDamageEvent(this, DamageCause.DROWNING, 2));
                     }
 
                     this.setDataProperty(new ShortEntityData(DATA_AIR, airTicks));
@@ -215,8 +224,7 @@ public abstract class EntityLiving extends Entity implements EntityDamageable {
 
                     if (airTicks <= -20) {
                         airTicks = 0;
-                        EntityDamageEvent ev = new EntityDamageEvent(this, EntityDamageEvent.CAUSE_SUFFOCATION, 2);
-                        this.attack(ev);
+                        this.attack(new EntityDamageEvent(this, DamageCause.SUFFOCATION, 2));
                     }
 
                     this.setDataProperty(new ShortEntityData(DATA_AIR, airTicks));
@@ -229,6 +237,14 @@ public abstract class EntityLiving extends Entity implements EntityDamageable {
         if (this.attackTime > 0) {
             this.attackTime -= tickDiff;
         }
+        if (this.riding == null) {
+            for (Entity entity : level.getNearbyEntities(this.boundingBox.grow(0.20000000298023224D, 0.0D, 0.20000000298023224D), this)) {
+                if (entity instanceof EntityVehicle) {
+                    this.collidingWith((EntityVehicle) entity);
+                }
+            }
+        }
+
         Timings.livingEntityBaseTickTimer.stopTiming();
 
         return hasUpdate;
@@ -325,4 +341,8 @@ public abstract class EntityLiving extends Entity implements EntityDamageable {
         return this.movementSpeed;
     }
 
+    @Override
+    public boolean doesTriggerPressurePlate() {
+        return true;
+    }
 }

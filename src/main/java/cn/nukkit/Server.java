@@ -8,18 +8,17 @@ import cn.nukkit.entity.Entity;
 import cn.nukkit.entity.EntityHuman;
 import cn.nukkit.entity.data.Skin;
 import cn.nukkit.entity.item.*;
-import cn.nukkit.entity.mob.EntityCreeper;
+import cn.nukkit.entity.mob.*;
 import cn.nukkit.entity.passive.*;
 import cn.nukkit.entity.projectile.EntityArrow;
 import cn.nukkit.entity.projectile.EntityEnderPearl;
 import cn.nukkit.entity.projectile.EntitySnowball;
-import cn.nukkit.entity.weather.EntityLightning;
 import cn.nukkit.event.HandlerList;
 import cn.nukkit.event.level.LevelInitEvent;
 import cn.nukkit.event.level.LevelLoadEvent;
-import cn.nukkit.event.player.PlayerKickEvent;
 import cn.nukkit.event.server.QueryRegenerateEvent;
-import cn.nukkit.inventory.*;
+import cn.nukkit.inventory.CraftingManager;
+import cn.nukkit.inventory.Recipe;
 import cn.nukkit.item.Item;
 import cn.nukkit.item.enchantment.Enchantment;
 import cn.nukkit.lang.BaseLang;
@@ -50,7 +49,10 @@ import cn.nukkit.network.CompressBatchedTask;
 import cn.nukkit.network.Network;
 import cn.nukkit.network.RakNetInterface;
 import cn.nukkit.network.SourceInterface;
-import cn.nukkit.network.protocol.*;
+import cn.nukkit.network.protocol.BatchPacket;
+import cn.nukkit.network.protocol.DataPacket;
+import cn.nukkit.network.protocol.PlayerListPacket;
+import cn.nukkit.network.protocol.ProtocolInfo;
 import cn.nukkit.network.query.QueryHandler;
 import cn.nukkit.network.rcon.RCON;
 import cn.nukkit.permission.BanEntry;
@@ -65,10 +67,13 @@ import cn.nukkit.plugin.service.NKServiceManager;
 import cn.nukkit.plugin.service.ServiceManager;
 import cn.nukkit.potion.Effect;
 import cn.nukkit.potion.Potion;
+import cn.nukkit.resourcepacks.ResourcePackManager;
 import cn.nukkit.scheduler.FileWriteTask;
 import cn.nukkit.scheduler.ServerScheduler;
 import cn.nukkit.utils.*;
+import cn.nukkit.utils.bugreport.ExceptionHandler;
 import co.aikar.timings.Timings;
+import com.google.common.base.Preconditions;
 
 import java.io.*;
 import java.nio.ByteOrder;
@@ -126,6 +131,8 @@ public class Server {
     private SimpleCommandMap commandMap;
 
     private CraftingManager craftingManager;
+
+    private ResourcePackManager resourcePackManager;
 
     private ConsoleCommandSender consoleSender;
 
@@ -187,8 +194,9 @@ public class Server {
     private Level defaultLevel = null;
 
     private Thread currentThread;
-    
-    public Server(MainLogger logger, final String filePath, String dataPath, String pluginPath) {
+
+    Server(MainLogger logger, final String filePath, String dataPath, String pluginPath) {
+        Preconditions.checkState(instance == null, "Already initialized!");
         currentThread = Thread.currentThread(); // Saves the current thread instance as a reference, used in Server#isPrimaryThread()
         instance = this;
         this.logger = logger;
@@ -259,6 +267,7 @@ public class Server {
                 put("server-ip", "0.0.0.0");
                 put("view-distance", 10);
                 put("white-list", false);
+                put("achievements", true);
                 put("announce-player-achievements", true);
                 put("spawn-protection", 16);
                 put("max-players", 20);
@@ -278,6 +287,8 @@ public class Server {
                 put("enable-rcon", false);
                 put("rcon.password", Base64.getEncoder().encodeToString(UUID.randomUUID().toString().replace("-", "").getBytes()).substring(3, 13));
                 put("auto-save", true);
+                put("force-resources", false);
+                put("bug-report", true);
             }
         });
 
@@ -297,18 +308,6 @@ public class Server {
 
         ServerScheduler.WORKERS = (int) poolSize;
 
-        int threshold;
-        try {
-            threshold = Integer.valueOf(String.valueOf(this.getConfig("network.batch-threshold", 256)));
-        } catch (Exception e) {
-            threshold = 256;
-        }
-
-        if (threshold < 0) {
-            threshold = -1;
-        }
-
-        Network.BATCH_THRESHOLD = threshold;
         this.networkCompressionLevel = (int) this.getConfig("network.compression-level", 7);
         this.networkCompressionAsync = (boolean) this.getConfig("network.async-compression", true);
 
@@ -349,6 +348,10 @@ public class Server {
             this.logger.setLogDebug(Nukkit.DEBUG > 1);
         }
 
+        if (this.getConfig().getBoolean("bug-report", true)) {
+            ExceptionHandler.registerExceptionHandler();
+        }
+
         this.logger.info(this.getLanguage().translateString("nukkit.server.networkStart", new String[]{this.getIp().equals("") ? "*" : this.getIp(), String.valueOf(this.getPort())}));
         this.serverID = UUID.randomUUID();
 
@@ -374,6 +377,7 @@ public class Server {
         Attribute.init();
 
         this.craftingManager = new CraftingManager();
+        this.resourcePackManager = new ResourcePackManager(new File(Nukkit.DATA_PATH, "resource_packs"));
 
         this.pluginManager = new PluginManager(this, this.commandMap);
         this.pluginManager.subscribeToPermission(Server.BROADCAST_CHANNEL_ADMINISTRATIVE, this.consoleSender);
@@ -540,10 +544,6 @@ public class Server {
     public static void broadcastPacket(Player[] players, DataPacket packet) {
         packet.encode();
         packet.isEncoded = true;
-        if (Network.BATCH_THRESHOLD >= 0 && packet.getBuffer().length >= Network.BATCH_THRESHOLD) {
-            Server.getInstance().batchPackets(players, new DataPacket[]{packet}, false);
-            return;
-        }
 
         for (Player player : players) {
             player.dataPacket(packet);
@@ -599,8 +599,6 @@ public class Server {
     public void broadcastPacketsCallback(byte[] data, List<String> identifiers) {
         BatchPacket pk = new BatchPacket();
         pk.payload = data;
-        pk.encode();
-        pk.isEncoded = true;
 
         for (String i : identifiers) {
             if (this.players.containsKey(i)) {
@@ -798,14 +796,15 @@ public class Server {
             while (this.isRunning) {
                 try {
                     this.tick();
+
+                    long next = this.nextTick;
+                    long current = System.currentTimeMillis();
+
+                    if (next - 0.1 > current) {
+                        Thread.sleep(next - current - 1, 900000);
+                    }
                 } catch (RuntimeException e) {
                     this.getLogger().logException(e);
-                }
-
-                try {
-                    Thread.sleep(1);
-                } catch (InterruptedException e) {
-                    Server.getInstance().getLogger().logException(e);
                 }
             }
         } catch (Throwable e) {
@@ -857,8 +856,8 @@ public class Server {
     public void updatePlayerListData(UUID uuid, long entityId, String name, Skin skin, Collection<Player> players) {
         this.updatePlayerListData(uuid, entityId, name, skin,
                 players.stream()
-                .filter(p -> !p.getUniqueId().equals(uuid))
-                .toArray(Player[]::new));
+                        .filter(p -> !p.getUniqueId().equals(uuid))
+                        .toArray(Player[]::new));
     }
 
     public void removePlayerListData(UUID uuid) {
@@ -894,29 +893,18 @@ public class Server {
     }
 
     public void sendRecipeList(Player player) {
-        CraftingDataPacket pk = new CraftingDataPacket();
-        pk.cleanRecipes = true;
-
-        for (Recipe recipe : this.getCraftingManager().getRecipes().values()) {
-            if (recipe instanceof ShapedRecipe) {
-                pk.addShapedRecipe((ShapedRecipe) recipe);
-            } else if (recipe instanceof ShapelessRecipe) {
-                pk.addShapelessRecipe((ShapelessRecipe) recipe);
-            }
-        }
-
-        for (FurnaceRecipe recipe : this.getCraftingManager().getFurnaceRecipes().values()) {
-            pk.addFurnaceRecipe(recipe);
-        }
-
-        player.dataPacket(pk);
+        player.dataPacket(CraftingManager.packet);
     }
 
     private void checkTickUpdates(int currentTick, long tickTime) {
         for (Player p : new ArrayList<>(this.players.values())) {
-            if (!p.loggedIn && (tickTime - p.creationTime) >= 10000 && p.kick(PlayerKickEvent.Reason.LOGIN_TIMEOUT, "Login timeout")) {
+            /*if (!p.loggedIn && (tickTime - p.creationTime) >= 10000 && p.kick(PlayerKickEvent.Reason.LOGIN_TIMEOUT, "Login timeout")) {
                 continue;
             }
+
+            client freezes when applying resource packs
+            todo: fix*/
+
             if (this.alwaysTickPlayers) {
                 p.onUpdate(currentTick);
             }
@@ -1225,6 +1213,7 @@ public class Server {
 
             case "3":
             case "spectator":
+            case "spc":
             case "view":
             case "v":
                 return Player.SPECTATOR;
@@ -1288,6 +1277,10 @@ public class Server {
         return this.getPropertyString("motd", "Nukkit Server For Minecraft: PE");
     }
 
+    public boolean getForceResources() {
+        return this.getPropertyBoolean("force-resources", false);
+    }
+
     public MainLogger getLogger() {
         return this.logger;
     }
@@ -1310,6 +1303,10 @@ public class Server {
 
     public CraftingManager getCraftingManager() {
         return craftingManager;
+    }
+
+    public ResourcePackManager getResourcePackManager() {
+        return resourcePackManager;
     }
 
     public ServerScheduler getScheduler() {
@@ -1645,6 +1642,7 @@ public class Server {
             this.levels.put(level.getId(), level);
 
             level.initLevel();
+            level.getGameRules().setGameRule("spawnRadius", "" + this.getSpawnRadius());
 
             level.setTickRate(this.baseTickRate);
         } catch (Exception e) {
@@ -1888,19 +1886,19 @@ public class Server {
     }
 
     public boolean shouldSavePlayerData() {
-        return this.getPropertyBoolean("player.save-player-data", true);
+        return (Boolean) this.getConfig("player.save-player-data", true);
     }
 
     /**
      * Checks the current thread against the expected primary thread for the server.
-     * 
+     *
      * <b>Note:</b> this method should not be used to indicate the current synchronized state of the runtime. A current thread matching the main thread indicates that it is synchronized, but a mismatch does not preclude the same assumption.
      * @return true if the current thread matches the expected primary thread, false otherwise
      */
     public boolean isPrimaryThread() {
         return (Thread.currentThread() == currentThread);
     }
-    
+
     private void registerEntities() {
         Entity.registerEntity("Arrow", EntityArrow.class);
         Entity.registerEntity("Item", EntityItem.class);
@@ -1911,12 +1909,39 @@ public class Server {
         Entity.registerEntity("Painting", EntityPainting.class);
         //todo mobs
         Entity.registerEntity("Creeper", EntityCreeper.class);
+        Entity.registerEntity("Zombie", EntityZombie.class);
+        Entity.registerEntity("Blaze", EntityBlaze.class);
+        Entity.registerEntity("CaveSpider", EntityCaveSpider.class);
+        Entity.registerEntity("ElderGuardian", EntityElderGuardian.class);
+        Entity.registerEntity("EnderDragon", EntityEnderDragon.class);
+        Entity.registerEntity("Enderman", EntityEnderman.class);
+        Entity.registerEntity("Endermite", EntityEndermite.class);
+        Entity.registerEntity("Ghast", EntityGhast.class);
+        Entity.registerEntity("Guardian", EntityGuardian.class);
+        Entity.registerEntity("Husk", EntityHusk.class);
+        Entity.registerEntity("MagmaCube", EntityMagmaCube.class);
+        Entity.registerEntity("Shulker", EntityShulker.class);
+        Entity.registerEntity("Silferfish", EntitySilverfish.class);
+        Entity.registerEntity("Skeleton", EntitySkeleton.class);
+        Entity.registerEntity("SkeletonHorse", EntitySkeletonHorse.class);
+        Entity.registerEntity("Slime", EntitySlime.class);
+        Entity.registerEntity("Spider", EntitySpider.class);
+        Entity.registerEntity("Stray", EntityStray.class);
+        Entity.registerEntity("Witch", EntityWitch.class);
         //TODO: more mobs
+        Entity.registerEntity("Bat", EntityBat.class);
         Entity.registerEntity("Chicken", EntityChicken.class);
         Entity.registerEntity("Cow", EntityCow.class);
+        Entity.registerEntity("Donkey", EntityDonkey.class);
+        Entity.registerEntity("Horse", EntityHorse.class);
+        Entity.registerEntity("Llama", EntityLlama.class);
+        Entity.registerEntity("Mooshroom", EntityMooshroom.class);
+        Entity.registerEntity("Mule", EntityMule.class);
+        Entity.registerEntity("PolarBear", EntityPolarBear.class);
         Entity.registerEntity("Pig", EntityPig.class);
         Entity.registerEntity("Rabbit", EntityRabbit.class);
         Entity.registerEntity("Sheep", EntitySheep.class);
+        Entity.registerEntity("Squid", EntitySquid.class);
         Entity.registerEntity("Wolf", EntityWolf.class);
         Entity.registerEntity("Ocelot", EntityOcelot.class);
         Entity.registerEntity("Villager", EntityVillager.class);
@@ -1931,7 +1956,7 @@ public class Server {
         // TODO: 2016/1/30 all finds of minecart
         Entity.registerEntity("Boat", EntityBoat.class);
 
-        Entity.registerEntity("Lightning", EntityLightning.class);
+        //Entity.registerEntity("Lightning", EntityLightning.class); lightning shouldn't be saved as entity
     }
 
     private void registerBlockEntities() {
@@ -1946,6 +1971,10 @@ public class Server {
         BlockEntity.registerBlockEntity(BlockEntity.CAULDRON, BlockEntityCauldron.class);
         BlockEntity.registerBlockEntity(BlockEntity.ENDER_CHEST, BlockEntityEnderChest.class);
         BlockEntity.registerBlockEntity(BlockEntity.BEACON, BlockEntityBeacon.class);
+        BlockEntity.registerBlockEntity(BlockEntity.PISTON_ARM, BlockEntityPistonArm.class);
+        BlockEntity.registerBlockEntity(BlockEntity.COMPARATOR, BlockEntityComparator.class);
+        BlockEntity.registerBlockEntity(BlockEntity.HOPPER, BlockEntityHopper.class);
+        BlockEntity.registerBlockEntity(BlockEntity.BED, BlockEntityBed.class);
     }
 
     public static Server getInstance() {

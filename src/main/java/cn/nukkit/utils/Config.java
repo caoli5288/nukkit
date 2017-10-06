@@ -99,6 +99,10 @@ public class Config {
         this.load(file, type, defaultMap);
     }
 
+    public Config(File file, int type, ConfigSection defaultMap) {
+        this.load(file.toString(), type, defaultMap);
+    }
+
     @Deprecated
     public Config(File file, int type, LinkedHashMap<String, Object> defaultMap) {
         this(file.toString(), type, new ConfigSection(defaultMap));
@@ -129,6 +133,7 @@ public class Config {
         this.file = new File(file);
         if (!this.file.exists()) {
             try {
+                this.file.getParentFile().mkdirs();
                 this.file.createNewFile();
             } catch (IOException e) {
                 MainLogger.getLogger().error("Could not create Config " + this.file.toString(), e);
